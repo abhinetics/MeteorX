@@ -1,63 +1,88 @@
 import React, { useState, useEffect, useContext, useRef } from "react";
-import Markdown from "markdown-to-jsx";
-import { useLocation } from "react-router-dom";
-import axios from "../config/axios";
-import { getWebContainer } from "../config/WebContainer";
+import { useNavigate, useLocation } from "react-router-dom";
+import { UserContext } from "../contex/user.context";
 import {
   initializeSocket,
   receiveMessage,
   sendMessage,
 } from "../config/socket";
-import { UserContext } from "../contex/user.context";
+import axios from "../config/axios";
+import { getWebContainer } from "../config/webcontainer";
+import hljs from "highlight.js";
+import Markdown from "markdown-to-jsx";
+
+function SyntaxHighlightedCode(props) {
+  const ref = useRef(null);
+
+  React.useEffect(() => {
+    if (ref.current && props.className?.includes("lang-") && window.hljs) {
+      window.hljs.highlightElement(ref.current);
+
+      // hljs won't reprocess the element unless this attribute is removed
+      ref.current.removeAttribute("data-highlighted");
+    }
+  }, [props.className, props.children]);
+
+  return <code {...props} ref={ref} />;
+}
 
 const Project = () => {
   const location = useLocation();
+
   const [isSidePanelOpen, setIsSidePanelOpen] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedUserId, setSelectedUserId] = useState(new Set());
-  const [users, setUsers] = useState([]);
+  const [selectedUserId, setSelectedUserId] = useState(new Set()); // Initialized as Set
   const [project, setProject] = useState(location.state.project);
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState([]);
   const { user } = useContext(UserContext);
-  const messageBox = useRef(null);
+  const messageBox = React.createRef();
+
+  const [users, setUsers] = useState([]);
+  const [messages, setMessages] = useState([]); // New state variable for messages
+  const [fileTree, setFileTree] = useState({});
+
   const [currentFile, setCurrentFile] = useState(null);
   const [openFiles, setOpenFiles] = useState([]);
-  const [fileTree, setFiletree] = useState({});
+
   const [webContainer, setWebContainer] = useState(null);
   const [iframeUrl, setIframeUrl] = useState(null);
+
   const [runProcess, setRunProcess] = useState(null);
 
   const handleUserClick = (id) => {
-    setSelectedUserId((prev) => {
-      const newSet = new Set(prev);
-      newSet.has(id) ? newSet.delete(id) : newSet.add(id);
-      return newSet;
+    setSelectedUserId((prevSelectedUserId) => {
+      const newSelectedUserId = new Set(prevSelectedUserId);
+      if (newSelectedUserId.has(id)) {
+        newSelectedUserId.delete(id);
+      } else {
+        newSelectedUserId.add(id);
+      }
+
+      return newSelectedUserId;
     });
   };
 
-  const addCollaborators = async () => {
-    try {
-      const res = await axios.put("/projects/add-user", {
-        projectId: project._id,
+  function addCollaborators() {
+    axios
+      .put("/projects/add-user", {
+        projectId: location.state.project._id,
         users: Array.from(selectedUserId),
+      })
+      .then((res) => {
+        console.log(res.data);
+        setIsModalOpen(false);
+      })
+      .catch((err) => {
+        console.log(err);
       });
-      console.log(res.data);
-      setIsModalOpen(false);
-    } catch (err) {
-      console.log(err);
-    }
-  };
+  }
 
   const send = () => {
-    if (!message.trim()) return;
-    const newMsg = {
+    sendMessage("project-message", {
       message,
-      sender: { _id: user._id, email: user.email },
-    };
-
-    setMessages((prev) => [...prev, newMsg]);
-    sendMessage("project-message", newMsg);
+      sender: user,
+    });
+    setMessages((prevMessages) => [...prevMessages, { sender: user, message }]); // Update messages state
     setMessage("");
   };
 
@@ -65,13 +90,12 @@ const Project = () => {
     const messageObject = JSON.parse(message);
 
     return (
-      <div className="overflow-auto bg-gray-800 text-white rounded-md p-3">
+      <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
         <Markdown
           children={messageObject.text}
           options={{
             overrides: {
-              // code: SyntaxHighlightedCode,
-              // add here SyntaxHighlighted
+              code: SyntaxHighlightedCode,
             },
           }}
         />
@@ -81,6 +105,7 @@ const Project = () => {
 
   useEffect(() => {
     initializeSocket(project._id);
+
     if (!webContainer) {
       getWebContainer().then((container) => {
         setWebContainer(container);
@@ -88,45 +113,69 @@ const Project = () => {
       });
     }
 
-    receiveMessage("project-message", (msg) => {
-      setMessages((prev) => {
-        console.log("Received message:", JSON.parse(msg.message));
-        const message = JSON.parse(msg.message);
-        webContainer?.mount(message.fileTree);
-        if (message.fileTree) {
-          setFiletree(message.fileTree);
-        }
-        const exists = prev.some(
-          (m) => m.message === msg.message && m.sender?._id === msg.sender?._id
+    receiveMessage("project-message", (data) => {
+      console.log(data);
+
+      // Check if the message already exists
+      setMessages((prevMessages) => {
+        const exists = prevMessages.some(
+          (m) => m.sender._id === data.sender._id && m.message === data.message
         );
-        if (exists) return prev;
-        if (msg.sender?._id === user._id) return prev;
-        return [...prev, msg];
+        if (exists) return prevMessages; // Skip duplicate
+
+        // AI-specific handling
+        if (data.sender._id === "ai") {
+          try {
+            const messageObj = JSON.parse(data.message);
+            webContainer?.mount(messageObj.fileTree);
+            if (messageObj.fileTree) setFileTree(messageObj.fileTree || {});
+          } catch (err) {
+            console.log("Error parsing AI message:", err);
+          }
+        }
+
+        return [...prevMessages, data]; // Add new message
       });
     });
 
-    const fetchUsers = async () => {
-      try {
-        const res = await axios.get("/users/all");
-        setUsers(res.data.users);
-      } catch (err) {
-        console.log(err);
-      }
-    };
+    axios
+      .get(`/projects/get-project/${location.state.project._id}`)
+      .then((res) => {
+        console.log(res.data.project);
 
-    const fetchProject = async () => {
-      try {
-        const res = await axios.get(`/projects/get-project/${project._id}`);
         setProject(res.data.project);
-      } catch (err) {
+        setFileTree(res.data.project.fileTree || {});
+      });
+
+    axios
+      .get("/users/all")
+      .then((res) => {
+        setUsers(res.data.users);
+      })
+      .catch((err) => {
         console.log(err);
-      }
-    };
+      });
+  }, []);
 
-    fetchProject();
-    fetchUsers();
-  }, [project._id]);
+  function saveFileTree(ft) {
+    axios
+      .put("/projects/update-file-tree", {
+        projectId: project._id,
+        fileTree: ft,
+      })
+      .then((res) => {
+        console.log(res.data);
+      })
+      .catch((err) => {
+        console.log(err);
+      });
+  }
 
+  // Removed appendIncomingMessage and appendOutgoingMessage functions
+
+  function scrollToBottom() {
+    messageBox.current.scrollTop = messageBox.current.scrollHeight;
+  }
   useEffect(() => {
     if (messageBox.current) {
       messageBox.current.scrollTo({
@@ -137,7 +186,7 @@ const Project = () => {
   }, [messages]);
 
   return (
-    <main className="h-screen w-screen flex overflow-hidden bg-gray-50">
+     <main className="h-screen w-screen flex overflow-hidden bg-gray-50">
       {/* Chat Section */}
       <section className="relative flex flex-col h-full w-full max-w-md bg-white border-r border-gray-200">
         {/* Header */}
