@@ -7,7 +7,7 @@ import {
   sendMessage,
 } from "../config/socket";
 import axios from "../config/axios";
-import { getWebContainer } from "../config/webcontainer";
+import { getWebContainer } from "../config/WebContainer";
 import hljs from "highlight.js";
 import Markdown from "markdown-to-jsx";
 
